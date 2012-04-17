@@ -1,0 +1,133 @@
+#!/usr/bin/env python
+import numpy as np
+import random
+import sys
+import app.algorithm as algorithm
+from app.audio.audiofile import AudioFile
+from app.bitstream import BitStream
+
+MULTIPLIER=32
+SECTOR_SIZE = 1152*MULTIPLIER
+FREQUENCY_BUCKET_RANGES = [(x, x) for x in range(50*MULTIPLIER, 80*MULTIPLIER, 1)]
+CLIP_PROTECTION = 0.85
+
+RANDOM_SEED = 42
+
+def printUsage():
+  """Print the usage guide for the program"""
+  print """
+stegan --encode file1 file2 file3
+stegan --decode file4 file5
+
+where
+
+    file1 is the name of an existing WAVE or mp3 file that
+    contains an audio recording (the \"carrier\").
+
+    file2 is the name of an existing file (of arbitrary type)
+    that contains the binary message to be added to file1.
+
+    file3 is the name of the WAVE or mp3 file to be created
+    by adding the binary message in file2 to the recording
+    in file1.
+
+    file4 is the name of an existing WAVE or mp3 file that
+    may have been created by your software (as the file3 in
+    the --encode direction).
+
+    file5 is the name of a file to be created by extracting
+    a binary message from file4 (under the assumption that
+    file4 was created by your software as the file3 in the
+    --encode direction).
+"""
+  return
+
+def main():
+  # Parse command line arguments
+  if len(sys.argv) < 4:
+    printUsage()
+    exit()
+  elif sys.argv[1] == "--encode" and len(sys.argv) == 5:
+    is_encoding = True
+    input_audio_name = sys.argv[2]
+    input_file_name = sys.argv[3]
+    output_audio_name = sys.argv[4]
+  elif sys.argv[1] == "--decode" and len(sys.argv) == 4:
+    is_encoding = False
+    input_audio_name = sys.argv[2]
+    output_file_name = sys.argv[3]
+  else:
+    printUsage()
+    exit()
+  
+  # Always use the same seed for the random number generator, so the
+  #  algorithm is deterministic and we can decode.
+  random.seed(RANDOM_SEED)
+
+  try:
+    in_audio = AudioFile.open(input_audio_name)
+  except Exception as err:
+    sys.stderr.write('Could not open file: ' + input_audio_name + "\n" + str(err) + "\n")
+    exit()
+  
+  if is_encoding:
+    try:
+      out_audio = AudioFile.open(output_audio_name, in_audio.get_format())
+    except Exception as err:
+      sys.stderr.write('Could not open file: ' + output_audio_name + "\n" + str(err) + "\n")
+      exit()
+    # Use same bitrate, ID3 tags, etc. for output as input
+    out_audio.set_params(in_audio.get_params())
+    try:
+      secret_data = BitStream(open(input_file_name, 'rb'))
+    except Exception as err:
+      sys.stderr.write("Could not open file: "  + input_file_name + "\n" + str(err) + "\n")
+      exit()
+      
+  else:
+    try:
+      secret_data = BitStream(open(output_file_name, 'wb'))
+    except Exception as err:
+      sys.stderr.write("Could not open file: "  + output_file_name + "\n" + str(err) + "\n")
+      exit()
+	
+  sectors, n_extra_frames = in_audio.read_sectors(SECTOR_SIZE)
+  for sector in sectors:
+    for channel_i, channel in enumerate(sector):
+      # Because we raise amplitudes to encode, we must not cause
+      # clipping. To minimize the chances of clipping, we lower the
+      # input signal (percieved amplitude is logorithmic, so this isn't
+      # as noticeable as you would expect)
+      if is_encoding: channel = channel * CLIP_PROTECTION
+      # Compute the real Fourier transform of the audio in this channel;
+      #  this switches from time domain to frequency domain.
+      channel_fft = np.fft.rfft(channel)
+      for frequency_bucket_range in FREQUENCY_BUCKET_RANGES:
+        # Choose a pseudrandom frequency bucket within this
+        #  frequency range tuple.
+        freq_bucket = random.randint(*frequency_bucket_range)
+        # XOR input with a random bit, so the encoded data appears random
+        flip_bit = random.randint(0,1)
+        if is_encoding:
+          bit = (secret_data.read() == 1)
+          channel_fft[freq_bucket] = algorithm.encode(bit ^ flip_bit, channel_fft[freq_bucket])
+        else:
+          bit = algorithm.decode(channel_fft[freq_bucket])
+          secret_data.write(bit ^ flip_bit)
+      if is_encoding:
+        # Switch back from frequency domain to time domian
+        sector[channel_i] = np.fft.irfft(channel_fft).astype(np.int16)
+    if is_encoding:
+      out_audio.write_sector(sector)
+  
+  if is_encoding:
+    # Write any remaining frames (that were not used for encoding) to
+    #  the output audio file.
+    out_audio.write_frames(in_audio.read_frames(n_extra_frames))
+    out_audio.close()
+  
+  in_audio.close()
+  secret_data.close()
+
+if __name__ == "__main__":
+  main()
