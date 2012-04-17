@@ -1,1 +1,1 @@
-![Pelican](i.imgur.com/zxFZd.jpg)
+![Pelican](http://i.imgur.com/zxFZd.jpg)
